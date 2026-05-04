@@ -1,5 +1,9 @@
 ### Project Specific stuff
 test_run_dir/*
+.claude/
+Note_phase/
+tools/
+src/main/scala/mac/
 ### XilinxISE template
 # intermediate build files
 *.bgn
