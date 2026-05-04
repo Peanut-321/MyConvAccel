@@ -475,4 +475,277 @@ class ConvDMASpec extends AnyFreeSpec with Matchers with ChiselSim {
       }
     }
   }
+
+  "ConvDMA alignment check should" - {
+
+    def runAlignTest(op: chisel3.UInt, baseAddr: Long, length: Int, desc: String): Unit = {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(false.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // 发送非法命令
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(op)
+        dut.io.cmd.bits.baseAddr.poke(baseAddr.U(64.W))
+        dut.io.cmd.bits.length.poke(length.U(16.W))
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        // 等 DMA 跳 sError
+        dut.clock.step(2)
+
+        // 验证
+        dut.io.error.expect(true.B, s"$desc: error should be 1")
+        dut.io.done.expect(true.B, s"$desc: done should be 1")
+        dut.io.readCount.expect(0.U, s"$desc: no reads should happen")
+        dut.io.busy.expect(false.B, s"$desc: busy should be 0")
+
+        println(s"--- SUCCESS: $desc ---")
+      }
+    }
+
+    "TC-ALIGN-01: load_input with address not 8-byte aligned" in {
+      runAlignTest(DmaOp.load_input, 0x1001L, 2048,
+        "load_input addr=0x1001 (misaligned)")
+    }
+
+    "TC-ALIGN-02: load_kernel with address not 2-byte aligned" in {
+      runAlignTest(DmaOp.load_kernel, 0x2001L, 64,
+        "load_kernel addr=0x2001 (misaligned)")
+    }
+
+    "TC-ALIGN-03: store_output with address not 8-byte aligned" in {
+      runAlignTest(DmaOp.store_output, 0x3001L, 2048,
+        "store_output addr=0x3001 (misaligned)")
+    }
+
+    "TC-ALIGN-04: address is zero" in {
+      runAlignTest(DmaOp.load_input, 0x0L, 2048,
+        "load_input addr=0 (null)")
+    }
+  }
+
+  "ConvDMA backpressure should" - {
+
+    "TC-BP-01: mem stall and resume (forceStall)" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(true.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // 预填
+        val data = Array.tabulate(256) { i =>
+          val base = i * 4
+          (base & 0xFFFF).toLong |
+            (((base + 1) & 0xFFFF).toLong << 16) |
+            (((base + 2) & 0xFFFF).toLong << 32) |
+            (((base + 3) & 0xFFFF).toLong << 48)
+        }
+        for (i <- data.indices) {
+          dut.io.prefill.valid.poke(true.B)
+          dut.io.prefill.bits.addr.poke((0x1000L + i * 8).U(64.W))
+          dut.io.prefill.bits.data.poke(data(i).U(64.W))
+          dut.io.prefill.bits.isWrite.poke(true.B)
+          dut.io.prefill.ready.expect(true.B)
+          dut.clock.step()
+        }
+        dut.io.prefill.valid.poke(false.B)
+
+        // 发 load_input
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_input)
+        dut.io.cmd.bits.baseAddr.poke(0x1000.U(64.W))
+        dut.io.cmd.bits.length.poke(2048.U(16.W))
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        // 统一 while 循环：先跑 3 个 word → stall 20 拍 → 释放
+        var elems   = Seq.empty[Int]
+        var cycle   = 0
+        var done    = false
+        var stalled = false
+
+        while (!done && cycle < 3000) {
+          // 第 18 拍拉 stall，第 38 拍释放
+          if (cycle == 18)      dut.io.forceStall.poke(true.B)
+          if (cycle == 38)      dut.io.forceStall.poke(false.B)
+
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            elems = elems :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+
+          // stall 期间验证 done 没拉高
+          if (cycle == 37) {
+            val sd = dut.io.done.peek().litToBoolean
+            assert(!sd, "DMA should not finish while stalled")
+          }
+
+          done = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        assert(elems.length == 1024, s"Expected 1024, got ${elems.length}")
+        assert(elems == (0 until 1024).toSeq, "Elements out of order after stall")
+        dut.io.done.expect(true.B)
+        dut.io.error.expect(false.B)
+
+        println(s"--- SUCCESS: TC-BP-01 mem stall/release, ${elems.length} elements ---")
+      }
+    }
+
+    "TC-BP-02: loadStream backpressure" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(false.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // 预填
+        val data = Array.tabulate(256) { i =>
+          val base = i * 4
+          (base & 0xFFFF).toLong |
+            (((base + 1) & 0xFFFF).toLong << 16) |
+            (((base + 2) & 0xFFFF).toLong << 32) |
+            (((base + 3) & 0xFFFF).toLong << 48)
+        }
+        for (i <- data.indices) {
+          dut.io.prefill.valid.poke(true.B)
+          dut.io.prefill.bits.addr.poke((0x1000L + i * 8).U(64.W))
+          dut.io.prefill.bits.data.poke(data(i).U(64.W))
+          dut.io.prefill.bits.isWrite.poke(true.B)
+          dut.io.prefill.ready.expect(true.B)
+          dut.clock.step()
+        }
+        dut.io.prefill.valid.poke(false.B)
+
+        // 发 load_input
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_input)
+        dut.io.cmd.bits.baseAddr.poke(0x1000.U(64.W))
+        dut.io.cmd.bits.length.poke(2048.U(16.W))
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        // 消费前 8 个元素，然后拉低 ready（模拟下游忙）
+        var elems = Seq.empty[Int]
+        var cycle = 0
+        var done  = false
+
+        while (elems.length < 8 && cycle < 100) {
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            dut.io.loadStream.ready.poke(true.B)
+            elems = elems :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+          dut.clock.step()
+          cycle += 1
+        }
+        // 拉低 ready — Queue 会填满，DMA 卡在 sUnpack
+        dut.io.loadStream.ready.poke(false.B)
+
+        // 等 30 cycles — 验证没死锁
+        dut.clock.step(30)
+        val busyWhileStalled = dut.io.busy.peek().litToBoolean
+        assert(busyWhileStalled, "DMA should be busy (stalled in sUnpack)")
+
+        // 恢复消费
+        var done2 = false
+        while (!done2 && cycle < 3000) {
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            dut.io.loadStream.ready.poke(true.B)
+            elems = elems :+ dut.io.loadStream.bits.peek().litValue.toInt
+          } else {
+            dut.io.loadStream.ready.poke(false.B)
+          }
+          done2 = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        assert(elems.length == 1024, s"Expected 1024, got ${elems.length}")
+        assert(elems == (0 until 1024).toSeq, "Elements out of order after backpressure")
+        dut.io.done.expect(true.B)
+        dut.io.error.expect(false.B)
+
+        println(s"--- SUCCESS: TC-BP-02 loadStream backpressure, ${elems.length} elements ---")
+      }
+    }
+
+    "TC-BP-03: storeStream backpressure (upstream pauses)" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(false.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // 发 store_output
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.store_output)
+        dut.io.cmd.bits.baseAddr.poke(0x3000.U(64.W))
+        dut.io.cmd.bits.length.poke(2048.U(16.W))
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        // 喂 20 个元素（5 组写），然后暂停
+        var elemIdx = 0
+        var cycle   = 0
+
+        while (elemIdx < 20 && cycle < 100) {
+          dut.io.storeStream.valid.poke(false.B)
+          if (dut.io.storeStream.ready.peek().litToBoolean) {
+            dut.io.storeStream.valid.poke(true.B)
+            dut.io.storeStream.bits.poke(elemIdx.U(16.W))
+            elemIdx += 1
+          }
+          dut.clock.step()
+          cycle += 1
+        }
+
+        // 断流 20 cycles — DMA 等元素，不报错
+        dut.io.storeStream.valid.poke(false.B)
+        dut.clock.step(20)
+        val notDone = !dut.io.done.peek().litToBoolean
+        assert(notDone, "DMA should not finish while waiting for elements")
+
+        // 恢复喂入剩余元素
+        var done = false
+        while (!done && elemIdx < 1024 && cycle < 3000) {
+          dut.io.storeStream.valid.poke(false.B)
+          if (dut.io.storeStream.ready.peek().litToBoolean) {
+            dut.io.storeStream.valid.poke(true.B)
+            dut.io.storeStream.bits.poke(elemIdx.U(16.W))
+            elemIdx += 1
+          }
+          done = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        // 等 done
+        while (!done && cycle < 3000) {
+          dut.io.storeStream.valid.poke(false.B)
+          done = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        assert(elemIdx == 1024, s"Expected 1024 elements fed, got $elemIdx")
+        dut.io.done.expect(true.B)
+        dut.io.error.expect(false.B)
+
+        println(s"--- SUCCESS: TC-BP-03 storeStream backpressure, $elemIdx elements ---")
+      }
+    }
+  }
 }
