@@ -6,6 +6,9 @@ ThisBuild / organization     := "com.github.peanut321"
 
 val chiselVersion = "7.7.0"
 
+// 单核 VM 修复：确保 Verilator -j 参数 >= 1
+Test / javaOptions += "-XX:ActiveProcessorCount=2"
+
 lazy val root = (project in file("."))
   .settings(
     name := "MyConvAccel",
