@@ -26,6 +26,7 @@ class ConvEngineSpec extends AnyFreeSpec with Matchers with ChiselSim {
 
     "TC-CONV-01 identity kernel: 输出 = 输入" in {
       simulate(new ConvEngine) { dut =>
+        dut.io.stall.poke(false.B)
         val kernelHex   = readHex(resPath + "identity_kernel_kernel.hex")
         val inputHex    = readHex(resPath + "identity_kernel_input.hex")
         val expectedHex = readHex(resPath + "identity_kernel_expected.hex")
@@ -86,6 +87,7 @@ class ConvEngineSpec extends AnyFreeSpec with Matchers with ChiselSim {
 
     "TC-CONV-02 box blur" in {
       simulate(new ConvEngine) { dut =>
+        dut.io.stall.poke(false.B)
         val kernelHex   = readHex(resPath + "box_blur_ones_kernel.hex")
         val inputHex    = readHex(resPath + "box_blur_ones_input.hex")
         val expectedHex = readHex(resPath + "box_blur_ones_expected.hex")
@@ -137,6 +139,7 @@ class ConvEngineSpec extends AnyFreeSpec with Matchers with ChiselSim {
 
     "TC-CONV-03 edge detect (sobel)" in {
       simulate(new ConvEngine) { dut =>
+        dut.io.stall.poke(false.B)
         val kernelHex   = readHex(resPath + "edge_detect_sobel_kernel.hex")
         val inputHex    = readHex(resPath + "edge_detect_sobel_input.hex")
         val expectedHex = readHex(resPath + "edge_detect_sobel_expected.hex")
@@ -188,6 +191,7 @@ class ConvEngineSpec extends AnyFreeSpec with Matchers with ChiselSim {
 
     "TC-CONV-04 saturation" in {
       simulate(new ConvEngine) { dut =>
+        dut.io.stall.poke(false.B)
         val kernelHex   = readHex(resPath + "saturation_test_kernel.hex")
         val inputHex    = readHex(resPath + "saturation_test_input.hex")
         val expectedHex = readHex(resPath + "saturation_test_expected.hex")

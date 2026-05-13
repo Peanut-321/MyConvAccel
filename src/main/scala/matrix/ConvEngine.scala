@@ -17,6 +17,9 @@ class ConvEngine extends Module {
     // 输出
     val outValid    = Output(Bool())
     val result      = Output(SInt(16.W))
+
+    // 反压：冻结流水线
+    val stall       = Input(Bool())
   })
 
   // 实例化三个子模块
@@ -24,9 +27,12 @@ class ConvEngine extends Module {
   val kernel = Module(new KernelROM)
   val conv   = Module(new ConvUnit)
 
+  // stall 门控：冻结时切断 colValid，ShiftWindow 不移位，ConvUnit 不进新数据
+  val effectiveColValid = io.colValid && !io.stall
+
   // 外部 → ShiftWindow
   window.io.colIn    := io.colIn
-  window.io.colValid := io.colValid
+  window.io.colValid := effectiveColValid
 
   // 外部 → KernelROM
   kernel.io.we    := io.kernelWe
@@ -37,7 +43,7 @@ class ConvEngine extends Module {
   conv.io.window  := window.io.window
   conv.io.kernel  := kernel.io.kernel
   // inValid 延迟 1 拍与 window 寄存器输出对齐
-  conv.io.inValid := RegNext(io.colValid, false.B)
+  conv.io.inValid := RegNext(effectiveColValid, false.B)
 
   // ConvUnit → 外部
   io.outValid := conv.io.outValid
