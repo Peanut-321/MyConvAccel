@@ -28,7 +28,9 @@ class ConvDMATestHarness extends Module {
     val forceStall  = Input(Bool())
     val prefill     = Flipped(Decoupled(new SimpleMemReq))
     val readCount   = Output(UInt(16.W))
-    val fsmState    = Output(UInt(3.W))   // 0=sIdle,1=sIssue,2=sWaitResp,3=sUnpack,4=sGather,5=sDone,6=sError
+    val fsmState    = Output(UInt(3.W))
+    val dbgInflight = Output(UInt(3.W))   // DMA inflightCount
+    val dbgFifoCnt  = Output(UInt(4.W))   // DMA respFifo count
     // 调试：暴露 mem 总线信号供逐周期追踪
     val dbgReqV     = Output(Bool())
     val dbgReqR     = Output(Bool())
@@ -47,6 +49,8 @@ class ConvDMATestHarness extends Module {
   io.done := dma.io.done
   io.error := dma.io.error
   io.fsmState     := dma.io.state
+  io.dbgInflight  := dma.io.dbgInflight
+  io.dbgFifoCnt   := dma.io.dbgFifoCount
   io.dbgReqV      := dma.io.mem.req.valid
   io.dbgReqR      := dma.io.mem.req.ready
   io.dbgReqAddr   := dma.io.mem.req.bits.addr
@@ -153,7 +157,7 @@ class ConvDMASpec extends AnyFreeSpec with Matchers with ChiselSim {
         var skipped    = false
         val watchdog   = 3000
 
-        val stateNames = Array("sIdle","sIssue","sWaitResp","sUnpack","sGather","sDone ","sError")
+        val stateNames = Array("sIdle","sIssue","sWaitResp","sUnpack","sGather","sDone ","sError","sLoadA")
 
         println(s"\n" + "=" * 72)
         println(s"  ConvDMA load_input —— 逐周期硬件追踪")
@@ -285,7 +289,7 @@ class ConvDMASpec extends AnyFreeSpec with Matchers with ChiselSim {
         var reqCount = 0
         var wordIdx  = 0
         var prevState = -1
-        val stateNames = Array("sIdle","sIssue","sWaitResp","sUnpack","sGather","sDone ","sError")
+        val stateNames = Array("sIdle","sIssue","sWaitResp","sUnpack","sGather","sDone ","sError","sLoadA")
 
         println(s"\n" + "=" * 72)
         println(s"  ConvDMA load_kernel —— 逐周期硬件追踪")
@@ -384,7 +388,7 @@ class ConvDMASpec extends AnyFreeSpec with Matchers with ChiselSim {
         var cycle     = 0
         var prevState = -1
         val totalElem = 1024
-        val stateNames = Array("sIdle","sIssue","sWaitResp","sUnpack","sGather","sDone ","sError")
+        val stateNames = Array("sIdle","sIssue","sWaitResp","sUnpack","sGather","sDone ","sError","sLoadA")
 
         println(s"\n" + "=" * 72)
         println(s"  ConvDMA store_output —— 逐周期硬件追踪")
@@ -745,6 +749,287 @@ class ConvDMASpec extends AnyFreeSpec with Matchers with ChiselSim {
         dut.io.error.expect(false.B)
 
         println(s"--- SUCCESS: TC-BP-03 storeStream backpressure, $elemIdx elements ---")
+      }
+    }
+  }
+
+  "ConvDMA pipeline boundary" - {
+
+    "TC-PIPE-01: inflight window fills to 4 then blocks" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(true.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // Prefill 64 words (more than enough to fill inflight window)
+        for (i <- 0 until 64) {
+          val base = i * 4
+          val data = (base & 0xFFFF).toLong |
+            (((base + 1) & 0xFFFF).toLong << 16) |
+            (((base + 2) & 0xFFFF).toLong << 32) |
+            (((base + 3) & 0xFFFF).toLong << 48)
+          dut.io.prefill.valid.poke(true.B)
+          dut.io.prefill.bits.addr.poke((0x1000L + i * 8).U(64.W))
+          dut.io.prefill.bits.data.poke(data.U(64.W))
+          dut.io.prefill.bits.isWrite.poke(true.B)
+          dut.io.prefill.ready.expect(true.B)
+          dut.clock.step()
+        }
+        dut.io.prefill.valid.poke(false.B)
+
+        // Launch load_input: 64 words = 256 elements
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_input)
+        dut.io.cmd.bits.baseAddr.poke(0x1000.U(64.W))
+        dut.io.cmd.bits.length.poke(512.U(16.W))  // 64 words
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        var inflightPeeked = Seq.empty[Int]
+        var elems = Seq.empty[Int]
+        var cycle = 0
+        var done = false
+
+        while (!done && cycle < 1000) {
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            elems = elems :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+          inflightPeeked = inflightPeeked :+ dut.io.dbgInflight.peek().litValue.toInt
+          done = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        // Verify inflight reached 4
+        val maxInflight = inflightPeeked.max
+        assert(maxInflight == 4, s"inflight should reach 4, max was $maxInflight")
+        // Verify 256 elements correct
+        assert(elems.length == 256, s"Expected 256, got ${elems.length}")
+        assert(elems == (0 until 256).toSeq, "Elements out of order")
+        dut.io.error.expect(false.B)
+
+        println(s"--- SUCCESS: TC-PIPE-01 inflight max=$maxInflight, ${elems.length} elements ---")
+      }
+    }
+
+    "TC-PIPE-02: respFIFO depth stress under backpressure" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(false.B)  // start with backpressure
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // Prefill 64 words
+        for (i <- 0 until 64) {
+          val base = i * 4
+          val data = (base & 0xFFFF).toLong |
+            (((base + 1) & 0xFFFF).toLong << 16) |
+            (((base + 2) & 0xFFFF).toLong << 32) |
+            (((base + 3) & 0xFFFF).toLong << 48)
+          dut.io.prefill.valid.poke(true.B)
+          dut.io.prefill.bits.addr.poke((0x1000L + i * 8).U(64.W))
+          dut.io.prefill.bits.data.poke(data.U(64.W))
+          dut.io.prefill.bits.isWrite.poke(true.B)
+          dut.io.prefill.ready.expect(true.B)
+          dut.clock.step()
+        }
+        dut.io.prefill.valid.poke(false.B)
+
+        // Launch load_input: 64 words
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_input)
+        dut.io.cmd.bits.baseAddr.poke(0x1000.U(64.W))
+        dut.io.cmd.bits.length.poke(512.U(16.W))
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        // Let DMA issue 4+ requests while loadStream backpressured
+        // DMA will fill inflight window, respFIFO accumulates
+        var maxFifo = 0
+        var cycle = 0
+        for (cyc <- 0 until 20) {
+          val cnt = dut.io.dbgFifoCnt.peek().litValue.toInt
+          if (cnt > maxFifo) maxFifo = cnt
+          dut.clock.step()
+          cycle += 1
+        }
+
+        assert(maxFifo >= 2, s"FIFO should have >=2 entries under BP, got max=$maxFifo")
+
+        // Now release backpressure and consume all
+        var elems = Seq.empty[Int]
+        var done = false
+        while (!done && cycle < 1000) {
+          val hasData = dut.io.loadStream.valid.peek().litToBoolean
+          dut.io.loadStream.ready.poke(hasData.B)
+          if (hasData) {
+            elems = elems :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+          val cnt = dut.io.dbgFifoCnt.peek().litValue.toInt
+          if (cnt > maxFifo) maxFifo = cnt
+          done = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        assert(elems.length == 256, s"Expected 256, got ${elems.length}")
+        assert(elems == (0 until 256).toSeq, "Elements out of order")
+        assert(maxFifo <= 8, s"FIFO count $maxFifo should not exceed depth 8")
+        dut.io.error.expect(false.B)
+
+        println(s"--- SUCCESS: TC-PIPE-02 FIFO max depth=$maxFifo, ${elems.length} elements ---")
+      }
+    }
+
+    "TC-PIPE-03: back-to-back transfers (small then large)" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(true.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // Prefill 8 words (kernel) + 256 words (input)
+        for (i <- 0 until 264) {
+          val base = i * 4
+          val data = (base & 0xFFFF).toLong |
+            (((base + 1) & 0xFFFF).toLong << 16) |
+            (((base + 2) & 0xFFFF).toLong << 32) |
+            (((base + 3) & 0xFFFF).toLong << 48)
+          dut.io.prefill.valid.poke(true.B)
+          dut.io.prefill.bits.addr.poke((0x1000L + i * 8).U(64.W))
+          dut.io.prefill.bits.data.poke(data.U(64.W))
+          dut.io.prefill.bits.isWrite.poke(true.B)
+          dut.io.prefill.ready.expect(true.B)
+          dut.clock.step()
+        }
+        dut.io.prefill.valid.poke(false.B)
+
+        // --- Transfer 1: kernel load (8 words = 32 elements) ---
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_kernel)
+        dut.io.cmd.bits.baseAddr.poke(0x1000.U(64.W))
+        dut.io.cmd.bits.length.poke(64.U(16.W))  // 8 words
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        var elems1 = Seq.empty[Int]
+        var cycle = 0
+        var done1 = false
+        while (!done1 && cycle < 500) {
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            elems1 = elems1 :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+          done1 = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+        dut.io.done.expect(true.B)
+        dut.io.error.expect(false.B)
+        assert(elems1.length == 32, s"Transfer 1: expected 32, got ${elems1.length}")
+        assert(elems1 == (0 until 32).toSeq, "Transfer 1: elements mismatch")
+
+        // Verify state reset: inflight=0, no stale data
+        val inflightAfter1 = dut.io.dbgInflight.peek().litValue.toInt
+        assert(inflightAfter1 == 0, s"inflight should be 0 after transfer 1, got $inflightAfter1")
+
+        // --- Transfer 2: input load (256 words = 1024 elements) from 0x1040 ---
+        // 8 words × 8 bytes = 0x40, so start at offset 0x1040
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_input)
+        dut.io.cmd.bits.baseAddr.poke(0x1040.U(64.W))  // after first 8 words
+        dut.io.cmd.bits.length.poke(2048.U(16.W))       // 256 words
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        var elems2 = Seq.empty[Int]
+        var done2 = false
+        while (!done2 && cycle < 3000) {
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            elems2 = elems2 :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+          done2 = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+        dut.io.done.expect(true.B)
+        dut.io.error.expect(false.B)
+        assert(elems2.length == 1024, s"Transfer 2: expected 1024, got ${elems2.length}")
+        // Transfer 1 consumed words 0-7 (elems 0-31), Transfer 2 consumes words 8-263 (elems 32-1055)
+        assert(elems2 == (32 until 1056).toSeq, "Transfer 2: elements mismatch")
+
+        println(s"--- SUCCESS: TC-PIPE-03 back-to-back: ${elems1.length} + ${elems2.length} elements ---")
+      }
+    }
+
+    "TC-PIPE-04: inflightCount net-change correctness" in {
+      simulate(new ConvDMATestHarness) { dut =>
+        dut.io.cmd.valid.poke(false.B)
+        dut.io.loadStream.ready.poke(true.B)
+        dut.io.storeStream.valid.poke(false.B)
+        dut.io.forceStall.poke(false.B)
+        dut.io.prefill.valid.poke(false.B)
+        dut.clock.step()
+
+        // Prefill 32 words
+        for (i <- 0 until 32) {
+          val base = i * 4
+          val data = (base & 0xFFFF).toLong |
+            (((base + 1) & 0xFFFF).toLong << 16) |
+            (((base + 2) & 0xFFFF).toLong << 32) |
+            (((base + 3) & 0xFFFF).toLong << 48)
+          dut.io.prefill.valid.poke(true.B)
+          dut.io.prefill.bits.addr.poke((0x1000L + i * 8).U(64.W))
+          dut.io.prefill.bits.data.poke(data.U(64.W))
+          dut.io.prefill.bits.isWrite.poke(true.B)
+          dut.io.prefill.ready.expect(true.B)
+          dut.clock.step()
+        }
+        dut.io.prefill.valid.poke(false.B)
+
+        // Launch load_input: 32 words
+        dut.io.cmd.valid.poke(true.B)
+        dut.io.cmd.bits.op.poke(DmaOp.load_input)
+        dut.io.cmd.bits.baseAddr.poke(0x1000.U(64.W))
+        dut.io.cmd.bits.length.poke(256.U(16.W))
+        dut.clock.step()
+        dut.io.cmd.valid.poke(false.B)
+
+        var inflightTrace = Seq.empty[Int]
+        var elems = Seq.empty[Int]
+        var cycle = 0
+        var done = false
+
+        while (!done && cycle < 1000) {
+          if (dut.io.loadStream.valid.peek().litToBoolean) {
+            elems = elems :+ dut.io.loadStream.bits.peek().litValue.toInt
+          }
+          inflightTrace = inflightTrace :+ dut.io.dbgInflight.peek().litValue.toInt
+          done = dut.io.done.peek().litToBoolean
+          dut.clock.step()
+          cycle += 1
+        }
+
+        // Verify inflightCount changes by at most ±1 per cycle
+        for (i <- 1 until inflightTrace.length) {
+          val delta = inflightTrace(i) - inflightTrace(i - 1)
+          assert(delta >= -1 && delta <= 1,
+            s"inflight delta at cycle $i is $delta (${inflightTrace(i-1)} → ${inflightTrace(i)})")
+        }
+
+        assert(elems.length == 128, s"Expected 128, got ${elems.length}")
+        assert(elems == (0 until 128).toSeq, "Elements out of order")
+        // Final inflight should be 0
+        assert(inflightTrace.last == 0, s"Final inflight should be 0, got ${inflightTrace.last}")
+        dut.io.error.expect(false.B)
+
+        println(s"--- SUCCESS: TC-PIPE-04 inflight delta verified over ${inflightTrace.length} cycles ---")
       }
     }
   }

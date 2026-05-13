@@ -20,7 +20,11 @@ class FakeScratchpadMemory(depth: Int = 4096) extends Module {
 
   io.mem.req.ready := !io.forceStall      //testBench拉高->内存不能收请求
 
-  //握手成功
+  // 先处理响应消费，再处理请求——避免同拍 req+resp 时 respValid 被误清
+  when(io.mem.resp.fire) {
+    respValid := false.B
+  }
+
   when(io.mem.req.fire) {
     val wordAddr = io.mem.req.bits.addr(63, 3) // 字节地址 → word 索引
     when(io.mem.req.bits.isWrite) {
@@ -30,10 +34,6 @@ class FakeScratchpadMemory(depth: Int = 4096) extends Module {
       respData  := storage.read(wordAddr) // 组合读 → 寄存器捕获 → 下拍输出，1 cycle 延迟
       respTag   := io.mem.req.bits.tag
     }
-  }
-
-  when(io.mem.resp.fire) {
-    respValid := false.B
   }
 
   io.mem.resp.valid      := respValid
