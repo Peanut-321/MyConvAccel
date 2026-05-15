@@ -32,7 +32,7 @@ class LineBuffer extends Module {
   //计数器
   val outputRow = RegInit(0.U(6.W))   // 当前输出行 0..31
   val outputCol = RegInit(0.U(6.W))   // 当前输出列 0..35
-  val loadRow   = RegInit(0.U(6.W))   // DMA 正在加载的行号
+  val loadRow   = RegInit(0.U(3.W))   // DMA 正在加载的行号 0..4
   val loadCol   = RegInit(0.U(5.W))   // DMA 正在加载的列号
 
   io.done := state === sDone 
@@ -71,7 +71,7 @@ class LineBuffer extends Module {
 
     //输出32行 x 36列
     is(sActive) {
-      val bufCol  = outputCol - 2.U        // 映射到 buffer 列索引 0..31
+      val bufCol  = (outputCol - 2.U)(4,0)  // 映射到 buffer 列索引 0..31, 截断至 5-bit
       val inImage = outputCol >= 2.U && outputCol <= 33.U
 
       // ── 列输出，含上下 padding ──
@@ -114,14 +114,15 @@ class LineBuffer extends Module {
       }.otherwise {
         // 左/右 padding 列：输出全零
         io.colOut   := VecInit.fill(5)(0.S(16.W))
-        io.colValid := false.B
+        // 延长 colValid 2 拍到 34..35，让管线尾部 img_30/img_31 能被 outValid 标记
+        io.colValid := outputCol >= 34.U && outputCol <= 35.U
       }
 
       // ── DMA 加载后续行（行 5..31）进入 tmpRow ──
       // 移位从 outputRow 2→3 开始，此时需要 img[5] 已备好
       // loadRow = outputRow + 3，需满足 loadRow < 32
       val needLoad = outputRow >= 2.U && outputRow + 3.U < 32.U
-      io.in.ready := needLoad && !io.stall
+      io.in.ready := needLoad && inImage && !io.stall
 
       when (io.in.valid && io.in.ready) {
         tmpRow(loadCol) := io.in.bits.asSInt
