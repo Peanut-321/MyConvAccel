@@ -1,112 +1,88 @@
-Chisel Project Template
-=======================
+# MyConvAccel
 
-You've done the [Chisel Bootcamp](https://github.com/freechipsproject/chisel-bootcamp), and now you
-are ready to start your own Chisel project.  The following procedure should get you started
-with a clean running [Chisel3](https://www.chisel-lang.org/) project.
+RISC-V RoCC convolution accelerator written in Chisel — a hardware generator for 2D convolution with a pipelined DMA-load, line-buffered, sliding-window architecture.
 
-## Make your own Chisel3 project
+## Overview
 
-### Dependencies
+MyConvAccel is a standalone Chisel hardware design implementing a 5×5 2D convolution accelerator targeting the RISC-V RoCC (Rocket Custom Coprocessor) interface. It accepts 32×32 input feature maps with same-padding this produces a 32×32 output and performs Q8.8 fixed-point convolution against a 5×5 kernel.
 
-#### JDK 11 or newer
+The design is currently **standalone** (no Chipyard/Rocket Chip dependency) with plans for Chipyard integration on an x86 Linux machine.
 
-We recommend using Java 11 or later LTS releases. While Chisel itself works with Java 8, our preferred build tool Mill requires Java 11. You can install the JDK as your operating system recommends, or use the prebuilt binaries from [Adoptium](https://adoptium.net/) (formerly AdoptOpenJDK).
+## Architecture
 
-#### SBT or mill
-
-SBT is the most common build tool in the Scala community. You can download it [here](https://www.scala-sbt.org/download.html).
-Mill is another Scala/Java build tool preferred by Chisel's developers.
-This repository includes a bootstrap script `./mill` so that no installation is necessary.
-You can read more about Mill on its website: https://mill-build.org.
-
-#### Verilator
-
-The test with `svsim` needs Verilator installed.
-See Verilator installation instructions [here](https://verilator.org/guide/latest/install.html).
-
-### How to get started
-
-#### Create a repository from the template
-
-This repository is a Github template. You can create your own repository from it by clicking the green `Use this template` in the top right.
-Please leave `Include all branches` **unchecked**; checking it will pollute the history of your new repository.
-For more information, see ["Creating a repository from a template"](https://docs.github.com/en/free-pro-team@latest/github/creating-cloning-and-archiving-repositories/creating-a-repository-from-a-template).
-
-#### Wait for the template cleanup workflow to complete
-
-After using the template to create your own blank project, please wait a minute or two for the `Template cleanup` workflow to run which will removes some template-specific stuff from the repository (like the LICENSE).
-Refresh the repository page in your browser until you see a 2nd commit by `actions-user` titled `Template cleanup`.
-
-
-#### Clone your repository
-
-Once you have created a repository from this template and the `Template cleanup` workflow has completed, you can click the green button to get a link for cloning your repository.
-Note that it is easiest to push to a repository if you set up SSH with Github, please see the [related documentation](https://docs.github.com/en/free-pro-team@latest/github/authenticating-to-github/connecting-to-github-with-ssh). SSH is required for pushing to a Github repository when using two-factor authentication.
-
-```sh
-git clone git@github.com:Peanut-321/MyConvAccel.git
-cd MyConvAccel
+```
+ConvDMA ──→ LineBuffer ──→ ConvEngine (ShiftWindow + KernelROM → ConvUnit)
+  │                            │
+  │  load / store via          │  5-stage pipelined MAC tree
+  │  SimpleMemIO               │  5 vertical pixels / cycle
+  │                            │
+  └── FakeScratchpadMemory ────┘
 ```
 
-#### Set project organization and name in build.sbt
+- **ConvDMA** — Pipelined DMA engine with concurrent issue/unpack, `respFifo` decoupling, and `inflightCount` flow control (max 4 in-flight)
+- **LineBuffer** — 5×32 row buffer converting row-major DMA pixels to 5-wide column-major output
+- **ConvEngine** — Sliding-window convolution pipeline (`ShiftWindow` → `ConvUnit`), 5-stage MAC tree with stall support
+- **ConvControl** — RoCC instruction decode (command, response, status registers)
+- **ConvAccelTop** — Master FSM orchestrating the full compute flow: idle → load kernel → prime buffer → compute → done
 
-The cleanup workflow will have attempted to provide sensible defaults for `ThisBuild / organization` and `name` in the `build.sbt`.
-Feel free to use your text editor of choice to change them as you see fit.
+### Key Specs
 
-#### Clean up the README.md file
+| Parameter | Value |
+|-----------|-------|
+| Input size | 32 × 32 |
+| Kernel size | 5 × 5 |
+| Padding | Same (output = 32 × 32) |
+| Data type | Q8.8 fixed-point |
+| MAC pipeline | 5 stages |
+| Line buffer | 5 rows × 32 columns |
 
-Again, use you editor of choice to make the README specific to your project.
+## Project Structure
 
-#### Add a LICENSE file
+```
+src/main/scala/matrix/
+  ConvAccelTop.scala    — Master FSM / top-level integration
+  ConvDMA.scala         — DMA load/store engine
+  LineBuffer.scala      — Row-to-column buffer
+  ConvEngine.scala      — Sliding-window conv pipeline
+  ShiftWindow.scala     — 5×5 window register
+  ConvUnit.scala        — 5-stage MAC tree
+  KernelROM.scala       — Kernel weight storage
+  ConvControl.scala     — RoCC instruction interface
+  SimpleMemIO.scala     — Memory port definitions
+  DmaCmd.scala          — DMA command encoding
+  FakeScratchpadMemory.scala — Testbench scratchpad model
 
-It is important to have a LICENSE for open source (or closed source) code.
-This template repository has the Unlicense in order to allow users to add any license they want to derivative code.
-The Unlicense is stripped when creating a repository from this template so that users do not accidentally unlicense their own work.
-
-For more information about a license, check out the [Github Docs](https://docs.github.com/en/free-pro-team@latest/github/building-a-strong-community/adding-a-license-to-a-repository).
-
-#### Commit your changes
-```sh
-git commit -m 'Starting MyConvAccel'
-git push origin main
+src/test/scala/matrix/  — Unit & integration tests (55+ tests)
+docs/spec.md            — Design specification
+Note_phase/             — Phase design documents
 ```
 
-### Did it work?
+## Build & Test
 
-You should now have a working Chisel3 project.
+**Prerequisites:** JDK 11+, SBT
 
-You can run the included test with:
 ```sh
+# Run all tests
 sbt test
+
+# Run a specific test suite
+sbt 'testOnly matrix.ConvAccelTopSpec'
 ```
 
-Alternatively, if you use Mill:
-```sh
-./mill MyConvAccel.test
-```
+## Implementation Status
 
-You should see a whole bunch of output that ends with something like the following lines
-```
-[info] Tests: succeeded 1, failed 0, canceled 0, ignored 0, pending 0
-[info] All tests passed.
-[success] Total time: 5 s, completed Dec 16, 2020 12:18:44 PM
-```
-If you see the above then...
+| Phase | Component | Status |
+|-------|-----------|--------|
+| 2 | ConvControl (RoCC decode) | Done |
+| 3 | ConvDMA (serial) | Done |
+| 4 | ConvDMA (pipelined) | Done |
+| 5 | LineBuffer | Done |
+| 6 | ConvEngine / ShiftWindow / ConvUnit | Done |
+| 7 | ConvAccelTop master FSM | Done |
+| 8+ | Chipyard integration | Planned (requires x86) |
 
-### It worked!
+## Toolchain
 
-You are ready to go. We have a few recommended practices and things to do.
-
-* Use packages and following conventions for [structure](https://www.scala-sbt.org/1.x/docs/Directories.html) and [naming](http://docs.scala-lang.org/style/naming-conventions.html)
-* Package names should be clearly reflected in the testing hierarchy
-* Build tests for all your work
-* Read more about testing in SBT in the [SBT docs](https://www.scala-sbt.org/1.x/docs/Testing.html)
-* This template includes a [test dependency](https://www.scala-sbt.org/1.x/docs/Library-Dependencies.html#Per-configuration+dependencies) on [ScalaTest](https://www.scalatest.org/). This, coupled with `svsim` (included with Chisel) and `verilator`, are a starting point for testing Chisel generators.
-  * You can remove this dependency in the build.sbt file if you want to
-* Change the name of your project in the build.sbt file
-* Change your README.md
-
-## Problems? Questions?
-
-Check out the [Chisel Users Community](https://www.chisel-lang.org/community.html) page for links to get in contact!
+- **Chisel** 7.7.0 (Scala 2.13.18)
+- **ScalaTest** 3.2.19
+- **SBT** as build tool
