@@ -46,6 +46,20 @@ class ConvEngine extends Module {
   conv.io.inValid := RegNext(effectiveColValid, false.B)
 
   // ConvUnit → 外部
-  io.outValid := conv.io.outValid
+//  val dropCnt = RegInit(0.U(6.W))
+//  val dropWarmup = dropCnt < 34.U
+  
+//  when(conv.io.outValid && dropWarmup){ dropCnt := dropCnt + 1.U }
+  
+  io.outValid := conv.io.outValid //&& !dropWarmup
   io.result   := conv.io.result
+  
+//  val dbgEngIdx = RegInit(0.U(12.W))
+  
+//  when(io.outValid){
+//    when(io.result =/=0.S){
+//     printf("[ENG-HIT] idx=%d result=%d\n", dbgEngIdx, io.result)
+//    }
+//    dbgEngIdx := dbgEngIdx +1.U
+//  }
 }

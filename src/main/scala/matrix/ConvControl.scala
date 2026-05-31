@@ -100,7 +100,7 @@ class ConvControl extends Module {
   //   SET   (0-2): accept unless sBusy
   //   START (3):   accept only in sIdle or sDone
   //   POLL  (4):   always accept
-  io.instrReady := MuxLookup(funct7, false.B)(Seq(
+  io.instrReady := MuxLookup(funct7, false.B, Seq(
     0.U -> (state =/= sBusy),
     1.U -> (state =/= sBusy),
     2.U -> (state =/= sBusy),
@@ -199,6 +199,10 @@ class ConvControl extends Module {
   // ════════════════════════════════════════════════════════════════════════
   // Status outputs
   // ════════════════════════════════════════════════════════════════════════
+ // printf(
+ // p"[CTRL] state=$state busy=$busy done=$done fake=$fakeCounter in=${Hexadecimal(addrIn)}\n"
+ // )
+  
   io.status.busy    := busy
   io.status.done    := done
   io.status.overflow := overflow

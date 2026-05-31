@@ -50,6 +50,47 @@ class ConvUnit extends Module {
   for (r <- 0 until 5; c <- 0 until 5) {
     s0_prod(r * 5 + c) := io.window(r)(c) * io.kernel(r)(c)
   }
+  
+  val anyProdNonZero = s0_prod.map(_ =/= 0.S).reduce(_ || _)
+val dbgProdHitCnt = RegInit(0.U(6.W))
+
+when(io.inValid && anyProdNonZero && dbgProdHitCnt < 20.U) {
+  printf("[PROD-HIT] ")
+  printf("hit=%d ", dbgProdHitCnt)
+
+  printf("p0=%d ", s0_prod(0))
+  printf("p1=%d ", s0_prod(1))
+  printf("p2=%d ", s0_prod(2))
+  printf("p3=%d ", s0_prod(3))
+  printf("p4=%d ", s0_prod(4))
+
+  printf("p5=%d ", s0_prod(5))
+  printf("p6=%d ", s0_prod(6))
+  printf("p7=%d ", s0_prod(7))
+  printf("p8=%d ", s0_prod(8))
+  printf("p9=%d ", s0_prod(9))
+
+  printf("p10=%d ", s0_prod(10))
+  printf("p11=%d ", s0_prod(11))
+  printf("p12=%d ", s0_prod(12))
+  printf("p13=%d ", s0_prod(13))
+  printf("p14=%d ", s0_prod(14))
+
+  printf("p15=%d ", s0_prod(15))
+  printf("p16=%d ", s0_prod(16))
+  printf("p17=%d ", s0_prod(17))
+  printf("p18=%d ", s0_prod(18))
+  printf("p19=%d ", s0_prod(19))
+
+  printf("p20=%d ", s0_prod(20))
+  printf("p21=%d ", s0_prod(21))
+  printf("p22=%d ", s0_prod(22))
+  printf("p23=%d ", s0_prod(23))
+  printf("p24=%d\n", s0_prod(24))
+
+  dbgProdHitCnt := dbgProdHitCnt + 1.U
+}
+
 
   // ── Stage 1 (寄存): 25 → 13 pairwise sum ──
   val s1_in = Wire(Vec(13, SInt(32.W)))
@@ -97,7 +138,37 @@ class ConvUnit extends Module {
   val s5_result = RegNext(saturated)
 
   io.result := s5_result
+  
+  val dbgConvPrintCnt = RegInit(0.U(6.W))
+
+when(io.outValid && dbgConvPrintCnt < 32.U) {
+  printf("[CONV-DBG] ")
+  printf("cnt=%d ", dbgConvPrintCnt)
+  printf("w22=%d ", io.window(2)(2))
+  printf("k22=%d ", io.kernel(2)(2))
+  printf("sum=%d ", sum)
+  printf("rounded=%d ", rounded)
+  printf("saturated=%d ", saturated)
+  printf("result=%d\n", io.result)
+
+  dbgConvPrintCnt := dbgConvPrintCnt + 1.U
+}
+
 
   // ── inValid 传播, 延迟 5 拍 ──
   io.outValid := ShiftRegister(io.inValid, 5, false.B, true.B)
+  
+  val dbgResultHitCnt = RegInit(0.U(6.W))
+
+when(io.outValid && io.result =/= 0.S && dbgResultHitCnt < 20.U) {
+  printf("[RESULT-HIT] ")
+  printf("hit=%d ", dbgResultHitCnt)
+  printf("sum=%d ", sum)
+  printf("rounded=%d ", rounded)
+  printf("saturated=%d ", saturated)
+  printf("result=%d\n", io.result)
+
+  dbgResultHitCnt := dbgResultHitCnt + 1.U
+}
+
 }
