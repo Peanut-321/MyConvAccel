@@ -14,7 +14,9 @@
 //#define ROCC_INSTRUCTION_SS(X, rs1, rs2, funct) \
   asm volatile (".insn r 0x0b, 0, %2, x0, %0, %1" \
                 :: "r"(rs1), "r"(rs2), "i"(funct))
-
+static int16_t input[1024] __attribute__((aligned(8)));
+static int16_t kernel[32] __attribute__((aligned(8)));
+static int16_t hw_out[1088] __attribute__((aligned(8)));
 
 static inline void set_addr_in(uint64_t addr) {
   ROCC_INSTRUCTION_SS(0, addr, 0, 0);
@@ -47,14 +49,19 @@ static inline uint64_t rdcycle() {
 
 int main(void) {
 
+     printf("SMOKE-1\n");
+
     uint64_t start, end;
     uint64_t status = 0;
+    
+    printf("SMOKE-2\n");
 
-    set_addr_in(0x80000000ULL);
-    set_addr_ker(0x80001000ULL);
-    set_addr_out(0x80002000ULL);
+    set_addr_in((uint64_t)(uintptr_t)input);
+    set_addr_ker((uint64_t)(uintptr_t)kernel);
+    set_addr_out((uint64_t)(uintptr_t)hw_out);
 
     start = rdcycle();
+    printf("SMOKE-3\n");
 
     start_accel();
 
