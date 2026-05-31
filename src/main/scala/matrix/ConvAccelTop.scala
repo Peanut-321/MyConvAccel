@@ -250,6 +250,9 @@ when(state === sIdle && io.start) {
   engine.io.colIn    := lineBuf.io.colOut
   engine.io.colValid := lineBuf.io.colValid && !engine.io.stall
   
+  val storeValidD1 = RegNext(lineBuf.io.storeValid, false.B)
+  val storeValidD2 = RegNext(storeValidD1, false.B)
+  
   val dbgColPrintCnt = RegInit(0.U(6.W))
 
 when(lineBuf.io.colValid && dbgColPrintCnt < 32.U) {
@@ -268,8 +271,33 @@ when(lineBuf.io.colValid && dbgColPrintCnt < 32.U) {
   // ------------------------------------------------------------
   // Engine result -> storeQueue
   // ------------------------------------------------------------
-  storeQueue.io.enq.valid := engine.io.outValid
+
+  val dbgFirstOutCnt = RegInit(0.U(4.W))
+  val storeColCnt = RegInit(0.U(6.W))
+  
+  when(state === sLoadKernel){storeColCnt := 0.U}
+  
+  val isRealStoreCol = storeColCnt >= 2.U
+  
+  storeQueue.io.enq.valid := engine.io.outValid && isRealStoreCol
   storeQueue.io.enq.bits  := engine.io.result.asUInt
+  
+  when(engine.io.outValid){
+   when(storeColCnt === 33.U){storeColCnt := 0.U}.otherwise{storeColCnt := storeColCnt + 1.U}
+  }
+  
+  when(engine.io.outValid && engine.io.result =/= 0.S){
+        printf("[TOP-NZ]result=%d colValid=%d storeValid=%d storeValidD1=%d storeValidD2=%d\n",
+          engine.io.result,
+          lineBuf.io.colValid,
+          lineBuf.io.storeValid,
+          storeValidD1,
+          storeValidD2
+          )
+  }
+  
+  
+  
   
   val dbgStoreIdx = RegInit(0.U(12.W))
   

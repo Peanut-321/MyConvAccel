@@ -5,18 +5,22 @@ import chisel3.util._
 
 class LineBuffer extends Module {
   val io = IO(new Bundle {
-
     // 输入（来自DMA）
-    val in       = Flipped(Decoupled(UInt(16.W)))
+    val in        = Flipped(Decoupled(UInt(16.W)))
 
     // 输出（去ConvEngine）
-    val colOut   = Output(Vec(5, SInt(16.W)))   // 五个垂直相邻像素
-    val colValid = Output(Bool())               // 当前列是否有效
+    val colOut    = Output(Vec(5, SInt(16.W)))   // 五个垂直相邻像素
+    val colValid  = Output(Bool())               // 当前列是否送入ConvEngine
+
+    // 输出（给Top层store控制）
+    // colValid 可以包含 34/35 flush，用来把ConvUnit pipeline 尾部结果冲出来；
+    // storeValid 只对应真正 32x32 输出区域，即 outputCol 2..33。
+    val storeValid = Output(Bool())
 
     // 控制（与顶层FSM的控制握手）
-    val start    = Input(Bool())                // 顶层 FSM 发出启动脉冲
-    val done     = Output(Bool())               // 32行全部输出完毕
-    val stall    = Input(Bool())                // 下游反压，暂停输出
+    val start     = Input(Bool())                // 顶层 FSM 发出启动脉冲
+    val done      = Output(Bool())               // 32行全部输出完毕
+    val stall     = Input(Bool())                // 下游反压，暂停输出
   })
 
   // 5 x 32 寄存器缓冲（5行，32列）
@@ -35,13 +39,14 @@ class LineBuffer extends Module {
   val outputCol = RegInit(0.U(6.W))   // 当前输出列 0..35
   val loadRow   = RegInit(0.U(3.W))   // DMA 正在加载的行号 0..4
   val loadCol   = RegInit(0.U(5.W))   // DMA 正在加载的列号 0..31
-  
+
   val dbgLineHitCnt = RegInit(0.U(6.W))
-      
-  io.done     := state === sDone
-  io.in.ready := false.B
-  io.colOut   := VecInit.fill(5)(0.S(16.W))
-  io.colValid := false.B
+
+  io.done       := state === sDone
+  io.in.ready   := false.B
+  io.colOut     := VecInit.fill(5)(0.S(16.W))
+  io.colValid   := false.B
+  io.storeValid := false.B
 
   // ------------------------------------------------------------
   // FSM
@@ -66,12 +71,14 @@ class LineBuffer extends Module {
         for (c <- 0 until 32) {
           tmpRow(c) := 0.S
         }
+
+        dbgLineHitCnt := 0.U
       }
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // 从 DMA 加载前五行元素到 LineBuffer
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     is(sPrime) {
       io.in.ready := true.B
 
@@ -91,23 +98,26 @@ class LineBuffer extends Module {
       }
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // 输出 32 行 x 36 列
     // outputCol = 0..35
     // 其中 outputCol 2..33 对应图像内部列 0..31
     // outputCol 0..1 和 34..35 为左右 padding / flush 区域
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     is(sActive) {
-      val bufCol  = (outputCol - 2.U)(4, 0)      // 映射到 buffer 列索引 0..31，截断至 5-bit
+      val bufCol  = (outputCol - 2.U)(4, 0)     // 映射到 buffer 列索引 0..31，截断至 5-bit
       val inImage = outputCol >= 2.U && outputCol <= 33.U
-      
-      val needLoad = outputRow >= 2.U && outputRow +3.U < 32.U
-      val waitInput = needLoad && inImage && !io.in.valid
-      val advance = !io.stall && !waitInput
 
-      // --------------------------------------------------------
+      // DMA 加载后续行进入 tmpRow
+      // outputRow 2..28 时，预加载 input row = outputRow + 3
+      // 注意：tmpRow 必须等整行加载完整后，才能并入 buffer
+      val needLoad  = outputRow >= 2.U && outputRow + 3.U < 32.U
+      val waitInput = needLoad && inImage && !io.in.valid
+      val advance   = !io.stall && !waitInput
+
+      // ------------------------------------------------------------
       // 列输出，含上下 padding
-      // --------------------------------------------------------
+      // ------------------------------------------------------------
       when(inImage) {
         when(outputRow === 0.U) {
           // top 两行 padding
@@ -148,46 +158,49 @@ class LineBuffer extends Module {
           }
         }
 
-        io.colValid := true.B
+        // 真正图像输出列 2..33：
+        // 送入 ConvEngine，并且允许后续 store。
+        io.colValid   := true.B
+        io.storeValid := true.B
 
       }.otherwise {
         // 左/右 padding 列：输出全零
         io.colOut := VecInit.fill(5)(0.S(16.W))
 
         // 延长 colValid 到 34..35，让管线尾部能够 outValid 标记
-        io.colValid := outputCol >= 34.U && outputCol <= 35.U
+        // 注意：这些 flush 列只用于推出 ConvUnit pipeline，不应写入最终 output。
+        io.colValid   := outputCol >= 34.U && outputCol <= 35.U
+        io.storeValid := false.B
       }
-      
-   //val anyColNonzero = io.colOut.map(_ =/=0.S).reduce(_ || _)
-   
-   when(!advance){
-     io.colValid := false.B
-   }
-      
-      when(io.colValid && io.colOut.map(_ =/=0.S).reduce(_ || _) && dbgLineHitCnt<20.U){
+
+      when(!advance) {
+        io.colValid   := false.B
+        io.storeValid := false.B
+      }
+
+      when(io.colValid && io.colOut.map(_ =/= 0.S).reduce(_ || _) && dbgLineHitCnt < 20.U) {
         printf("[LINE-HIT]")
         printf("hit=%d ", dbgLineHitCnt)
-        printf("outputRow=%d ",outputRow)
-        printf("outputCol=%d ",outputCol)
-        printf("col0=%d ",io.colOut(0))
-        printf("col1=%d ",io.colOut(1))
-        printf("col2=%d ",io.colOut(2))
-        printf("col3=%d ",io.colOut(3))
-        printf("col4=%d\n",io.colOut(4))
-        
-        dbgLineHitCnt := dbgLineHitCnt + 1.U
-      
-      }
-      
-      when(io.start){
-        dbgLineHitCnt := 0.U}
+        printf("outputRow=%d ", outputRow)
+        printf("outputCol=%d ", outputCol)
+        printf("col0=%d ", io.colOut(0))
+        printf("col1=%d ", io.colOut(1))
+        printf("col2=%d ", io.colOut(2))
+        printf("col3=%d ", io.colOut(3))
+        printf("col4=%d\n", io.colOut(4))
 
-      // --------------------------------------------------------
+        dbgLineHitCnt := dbgLineHitCnt + 1.U
+      }
+
+      when(io.start) {
+        dbgLineHitCnt := 0.U
+      }
+
+      // ------------------------------------------------------------
       // DMA 加载后续行进入 tmpRow
       // outputRow 2..28 时，预加载 input row = outputRow + 3
       // 注意：tmpRow 必须等整行加载完整后，才能并入 buffer
-      // --------------------------------------------------------
-      //val needLoad = outputRow >= 2.U && outputRow + 3.U < 32.U
+      // ------------------------------------------------------------
       io.in.ready := needLoad && inImage && !io.stall
 
       when(io.in.valid && io.in.ready) {
@@ -200,7 +213,7 @@ class LineBuffer extends Module {
         }
       }
 
-      // --------------------------------------------------------
+      // ------------------------------------------------------------
       // 计数器推进（反压中止）
       // 关键修复：
       // 原先 buffer 在 outputRow >= 2.U 时每拍都上移，tmpRow 尚未完整加载就进入 buffer(4)，
@@ -208,13 +221,13 @@ class LineBuffer extends Module {
       //
       // 现在只在一整行输出结束时（outputCol === 35.U）上移一次，
       // 此时 tmpRow 已经完成本行加载，才安全并入 buffer(4)。
-      // --------------------------------------------------------
+      // ------------------------------------------------------------
       when(advance) {
         when(outputCol === 35.U) {
           outputCol := 0.U
           outputRow := outputRow + 1.U
 
-          // 行 2->3 及之后：buffer 上移一行，tmpRow 进入 buffer(4)
+          // 行 2~3 及之后：buffer 上移一行，tmpRow 进入 buffer(4)
           // 只在行尾做一次，不能每个 cycle 做。
           when(outputRow >= 2.U && outputRow + 3.U < 32.U) {
             buffer(0) := buffer(1)
@@ -234,9 +247,9 @@ class LineBuffer extends Module {
       }
     }
 
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     // start 下降后回到 sIdle
-    // ----------------------------------------------------------
+    // ------------------------------------------------------------
     is(sDone) {
       when(!io.start) {
         state := sIdle

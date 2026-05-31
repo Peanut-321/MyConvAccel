@@ -163,13 +163,27 @@ static int run_test(const char *test_name) {
   printf("\n==============================\n");
   printf("TEST: %s\n", test_name);
   printf("==============================\n");
+  
+  uint64_t sw_cycles = 0;
+//  printf("[DBG] before software conv\n");
+//  uint64_t sw_start = rdcycle();
+//  software_conv_5x5_same_q88();
+//  uint64_t sw_end = rdcycle();
+//  printf("[DBG] after software conv\n");
 
-  uint64_t sw_start = rdcycle();
-  software_conv_5x5_same_q88();
-  uint64_t sw_end = rdcycle();
-  uint64_t sw_cycles = sw_end - sw_start;
+//  uint64_t sw_cycles = sw_end - sw_start;
 
+  printf("[DBG] before run_accel\n");
   uint64_t acc_cycles = run_accel();
+  printf("[DBG] after run_accel\n");
+
+
+//  uint64_t sw_start = rdcycle();
+//  software_conv_5x5_same_q88();
+//  uint64_t sw_end = rdcycle();
+//  uint64_t sw_cycles = sw_end - sw_start;
+
+//  uint64_t acc_cycles = run_accel();
 
   printf("Software cycles = %lu\n", sw_cycles);
   printf("Accelerator cycles = %lu\n", acc_cycles);
@@ -190,10 +204,21 @@ int main(void) {
   printf("kernel addr = 0x%lx\n", (uint64_t)(uintptr_t)kernel);
   printf("hw_out addr = 0x%lx\n", (uint64_t)(uintptr_t)hw_out);
 
+
+  
   clear_all();
-  input[16 * 32 + 16] = 256;
+  input[0] = 256;
   kernel[12] = 256;
-  total_errors += run_test("center_single_point");
+  sw_out[0] = 256;
+  total_errors += run_test("top_left");
+  
+    for(int i=0;i<HW_OUT_SIZE;i++){
+    if(hw_out[i]!=0)
+      printf("hw[%d]=%d\n",i,hw_out[i]);
+   }
+   
+ 
+  
 
 
  
