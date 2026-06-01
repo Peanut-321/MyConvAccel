@@ -123,17 +123,19 @@ class ConvAccelRoCCModule(outer: ConvAccelRoCC)
     when(io.cmd.bits.inst.funct === 4.U) {
       respPending := true.B
       respData := Cat(
-//        0.U(60.W),
-//        control.io.status.addrErr,
-//        control.io.status.overflow,
-//        control.io.status.done,
-//        control.io.status.busy
-          0.U(56.W),
-          accel.io.state,
-          topEverActive,
-          topStartSeen,
-          control.io.status.done,
-          Mux(topDoneSeen,false.B, true.B)
+        0.U(62.W),
+   //     control.io.status.addrErr,
+  //      control.io.status.overflow,
+ //       control.io.status.done,
+ //       control.io.status.busy,
+ //         0.U(56.W),
+ //         accel.io.state,
+ //        topEverActive,
+ //         topStartSeen,
+ //         control.io.status.done,
+ //         Mux(topDoneSeen,false.B, true.B)
+         topDoneSeen,
+         1.U(1.W)
           
       )
       respRd := io.cmd.bits.inst.rd

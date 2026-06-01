@@ -114,6 +114,10 @@ class LineBuffer extends Module {
       val needLoad  = outputRow >= 2.U && outputRow + 3.U < 32.U
       val waitInput = needLoad && inImage && !io.in.valid
       val advance   = !io.stall && !waitInput
+      
+      when(outputRow>=28.U && outputCol>=30.U){
+        printf("[TAIL-LB] row=%d col=%d colValid=%d\n",
+          outputRow, outputCol, io.colValid)}
 
       // ------------------------------------------------------------
       // 列输出，含上下 padding
@@ -137,17 +141,17 @@ class LineBuffer extends Module {
 
         }.elsewhen(outputRow === 30.U) {
           // bottom 一行 padding
-          io.colOut(0) := buffer(0)(bufCol)
-          io.colOut(1) := buffer(1)(bufCol)
-          io.colOut(2) := buffer(2)(bufCol)
-          io.colOut(3) := buffer(3)(bufCol)
+          io.colOut(0) := buffer(1)(bufCol)
+          io.colOut(1) := buffer(2)(bufCol)
+          io.colOut(2) := buffer(3)(bufCol)
+          io.colOut(3) := 0.S(16.W)
           io.colOut(4) := 0.S(16.W)
 
         }.elsewhen(outputRow === 31.U) {
           // bottom 两行 padding
-          io.colOut(0) := buffer(0)(bufCol)
-          io.colOut(1) := buffer(1)(bufCol)
-          io.colOut(2) := buffer(2)(bufCol)
+          io.colOut(0) := buffer(2)(bufCol)
+          io.colOut(1) := buffer(3)(bufCol)
+          io.colOut(2) := buffer(4)(bufCol)
           io.colOut(3) := 0.S(16.W)
           io.colOut(4) := 0.S(16.W)
 
@@ -195,6 +199,9 @@ class LineBuffer extends Module {
       when(io.start) {
         dbgLineHitCnt := 0.U
       }
+      
+      when(outputRow >= 30.U){
+        printf("[TAIL] row=%d col=%d inImage=%d colvalid=%d advance=%d   stall=%d\n",outputRow,outputCol,inImage,io.colValid,advance,io.stall)}
 
       // ------------------------------------------------------------
       // DMA 加载后续行进入 tmpRow

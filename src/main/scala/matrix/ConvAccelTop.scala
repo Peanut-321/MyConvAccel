@@ -90,7 +90,7 @@ class ConvAccelTop extends Module {
   val goLoadKernel = state === sIdle       && io.start
   val goLoadInput  = state === sLoadKernel && dma.io.done
   val goCompute    = state === sLoadInput  && dma.io.done
-  val goDone       = state === sCompute    && resultCnt >= 1088.U && dma.io.done
+  val goDone       = state === sCompute    && resultCnt >= 1024.U //&& dma.io.done
 
   // ------------------------------------------------------------
   // FSM update
@@ -107,6 +107,7 @@ class ConvAccelTop extends Module {
     state := sCompute
   }
 
+  when(goDone) { printf("[GO-DONE]\n")}
   when(goDone) {
     state := sDone
     doneReg := true.B
@@ -122,6 +123,27 @@ class ConvAccelTop extends Module {
   when(state === sIdle && io.start) {
     doneReg := false.B
   }
+  
+  when(state === sIdle) {
+  printf("[STATE] IDLE\n")
+}
+
+when(state === sLoadKernel) {
+  printf("[STATE] LOAD_KERNEL dmaDone=%d\n", dma.io.done)
+}
+
+when(state === sLoadInput) {
+  printf("[STATE] LOAD_INPUT dmaDone=%d\n", dma.io.done)
+}
+
+when(state === sCompute) {
+  printf("[STATE] COMPUTE resultCnt=%d\n", resultCnt)
+}
+
+when(state === sDone) {
+  printf("[STATE] DONE\n")
+}
+
 
   // ------------------------------------------------------------
   // Latch addresses at start
@@ -254,6 +276,8 @@ when(state === sIdle && io.start) {
   val storeValidD2 = RegNext(storeValidD1, false.B)
   
   val dbgColPrintCnt = RegInit(0.U(6.W))
+  
+  when(lineBuf.io.colValid){printf("[LB-VALID]\n")}
 
 when(lineBuf.io.colValid && dbgColPrintCnt < 32.U) {
 //  printf("[LINEBUF-OUT] ")
@@ -283,7 +307,8 @@ when(lineBuf.io.colValid && dbgColPrintCnt < 32.U) {
   storeQueue.io.enq.bits  := engine.io.result.asUInt
   
   when(engine.io.outValid){
-   when(storeColCnt === 33.U){storeColCnt := 0.U}.otherwise{storeColCnt := storeColCnt + 1.U}
+   when(storeColCnt === 33.U){storeColCnt := 0.U
+     }.otherwise{storeColCnt := storeColCnt + 1.U}
   }
   
   when(engine.io.outValid && engine.io.result =/= 0.S){
@@ -341,6 +366,16 @@ when(state === sIdle && io.start) {
   dbgStoreEnqHitCnt := 0.U
 }
 
+when(state === sCompute && resultCnt < 20.U) {
+  printf("[TOP-PROG] resultCnt=%d dmaDone=%d storeReady=%d engineValid=%d enqFire=%d\n",
+    resultCnt,
+    dma.io.done,
+    storeQueue.io.enq.ready,
+    engine.io.outValid,
+    storeQueue.io.enq.fire
+  )
+}
+
 
   // ------------------------------------------------------------
   // storeQueue -> DMA storeStream
@@ -377,6 +412,8 @@ when(state === sIdle && io.start) {
   // ------------------------------------------------------------
   when(engine.io.outValid && storeQueue.io.enq.fire) {
     resultCnt := resultCnt + 1.U
+    
+    when(resultCnt(5,0) === 0.U){printf("[RCNT] resultCnt=%d\n", resultCnt)}
   }
 
   // ------------------------------------------------------------
